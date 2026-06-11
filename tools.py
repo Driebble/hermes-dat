@@ -156,7 +156,8 @@ def _get_timeline(log_dir, legacy_log, days):
 
     timeline = []
     current_period = None
-    prev_state = None
+    prev_content = None
+    _status_counts = {}
 
     def _close_period(end_dt):
         nonlocal current_period
@@ -189,23 +190,29 @@ def _get_timeline(log_dir, legacy_log, days):
         }
 
     for e in entries:
-        state = (
-            e.get("discord_status"),
+        # Content = activities + Spotify only (ignore status flips)
+        content = (
             tuple(sorted(_activity_names(e))),
             (e.get("spotify") or {}).get("song"),
         )
+        status = e.get("discord_status") or "online"
         now = e["_dt"]
 
-        if prev_state is None:
+        if prev_content is None:
             current_period = _make_period(e, now)
-            prev_state = state
+            prev_content = content
             continue
 
-        if state != prev_state:
+        if content != prev_content:
+            # Real change — close current period, start new one
             _close_period(now)
             current_period = _make_period(e, now)
 
-        prev_state = state
+        # Track dominant status within the period
+        if current_period:
+            _status_counts[status] = _status_counts.get(status, 0) + 1
+
+        prev_content = content
 
     if entries:
         _close_period(entries[-1]["_dt"])

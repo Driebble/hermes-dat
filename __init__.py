@@ -27,7 +27,7 @@ def register(ctx):
 
     ctx.register_tool(
         name="discord_activity",
-        toolset="discord-activity",
+        toolset="hermes-discord-activity-tracker",
         schema=schemas.DISCORD_ACTIVITY,
         handler=tools.discord_activity,
     )
