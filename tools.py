@@ -12,10 +12,8 @@ from collections import defaultdict
 WIB = timezone(timedelta(hours=7))
 
 # Default paths
-_PLUGIN_DIR = Path(__file__).parent
 _HERMES_HOME = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes" / "profiles" / "aura"))
 _DEFAULT_LOG_DIR = _HERMES_HOME / "logs" / "discord-activity"
-_DEFAULT_LEGACY_LOG = _HERMES_HOME / "output" / "discord-activity.jsonl"
 
 
 def _get_log_dir():
@@ -25,19 +23,14 @@ def _get_log_dir():
     return log_dir
 
 
-def _load_entries(log_dir, cutoff, legacy_log=None):
+def _load_entries(log_dir, cutoff):
     """Load entries from daily JSONL files within the time window."""
     entries = []
 
-    # Read all .jsonl files in the daily directory
     if log_dir.is_dir():
         for filename in sorted(os.listdir(log_dir)):
             if filename.endswith(".jsonl"):
                 _load_file(entries, log_dir / filename, cutoff)
-
-    # Also check legacy single file
-    if legacy_log and legacy_log.exists():
-        _load_file(entries, legacy_log, cutoff)
 
     entries.sort(key=lambda e: e["_dt"])
     return entries
@@ -102,62 +95,51 @@ def _format_spotify(entry):
 # ─── Query Handlers ──────────────────────────────────────────────
 
 
-def _get_current_status(log_dir, legacy_log):
-    """Get the most recent presence entry — fast, no aggregation."""
-    all_entries = []
-
-    # Check daily files (most recent first)
+def _get_current_status(log_dir):
+    """Get the most recent presence entry — fast, reads only the last line."""
+    log_files = []
     if log_dir.is_dir():
-        for filename in sorted(os.listdir(log_dir), reverse=True):
-            if filename.endswith(".jsonl"):
-                filepath = log_dir / filename
-                with open(filepath, "r", encoding="utf-8") as f:
-                    lines = f.readlines()
-                if lines:
-                    last_line = lines[-1].strip()
-                    if last_line:
-                        try:
-                            entry = json.loads(last_line)
-                            entry["_dt"] = datetime.fromisoformat(entry["timestamp"])
-                            all_entries.append(entry)
-                            break  # Found today's last entry
-                        except (json.JSONDecodeError, ValueError):
-                            continue
+        log_files = sorted(
+            [f for f in os.listdir(log_dir) if f.endswith(".jsonl")],
+            reverse=True,
+        )
 
-    # Fallback to legacy file
-    if not all_entries and legacy_log and legacy_log.exists():
-        with open(legacy_log, "r", encoding="utf-8") as f:
-            lines = f.readlines()
-        if lines:
-            last_line = lines[-1].strip()
-            if last_line:
-                try:
-                    entry = json.loads(last_line)
-                    entry["_dt"] = datetime.fromisoformat(entry["timestamp"])
-                    all_entries.append(entry)
-                except (json.JSONDecodeError, ValueError):
-                    pass
+    for filename in log_files:
+        filepath = log_dir / filename
+        try:
+            with open(filepath, "rb") as f:
+                f.seek(0, 2)  # Seek to end
+                size = f.tell()
+                if size == 0:
+                    continue
+                # Read last 4KB or the whole file if smaller
+                f.seek(max(0, size - 4096))
+                tail = f.read().decode("utf-8", errors="replace")
+                # Get the last non-empty line
+                for line in reversed(tail.splitlines()):
+                    line = line.strip()
+                    if line:
+                        entry = json.loads(line)
+                        entry["_dt"] = datetime.fromisoformat(entry["timestamp"])
+                        activities = _activity_names(entry)
+                        spotify = _extract_spotify(entry)
+                        return json.dumps({
+                            "status": entry.get("discord_status"),
+                            "activities": activities,
+                            "spotify": spotify,
+                            "platforms": entry.get("platforms", {}),
+                            "last_updated": entry.get("timestamp"),
+                        })
+        except (json.JSONDecodeError, ValueError, OSError):
+            continue
 
-    if not all_entries:
-        return json.dumps({"error": "No presence data found"})
-
-    e = all_entries[0]
-    activities = _activity_names(e)
-    spotify = _extract_spotify(e)
-
-    return json.dumps({
-        "status": e.get("discord_status"),
-        "activities": activities,
-        "spotify": spotify,
-        "platforms": e.get("platforms", {}),
-        "last_updated": e.get("timestamp"),
-    })
+    return json.dumps({"error": "No presence data found"})
 
 
-def _get_timeline(log_dir, legacy_log, days):
+def _get_timeline(log_dir, days):
     """Build activity timeline by comparing consecutive entries."""
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
-    entries = _load_entries(log_dir, cutoff, legacy_log)
+    entries = _load_entries(log_dir, cutoff)
 
     if not entries:
         return json.dumps({"timeline": [], "message": "No entries found"})
@@ -165,7 +147,6 @@ def _get_timeline(log_dir, legacy_log, days):
     timeline = []
     current_period = None
     prev_content = None
-    _status_counts = {}
 
     def _close_period(end_dt):
         nonlocal current_period
@@ -182,9 +163,7 @@ def _get_timeline(log_dir, legacy_log, days):
 
     def _make_period(entry, start_dt):
         names = _activity_names(entry)
-        spotify = _extract_spotify(entry)
         activity = ", ".join(names) if names else "Online"
-        sp_str = f"{spotify['song']} — {spotify['artist']}" if spotify else None
         return {
             "_start_dt": start_dt,
             "_start_key": start_dt.strftime("%H:%M"),
@@ -194,7 +173,7 @@ def _get_timeline(log_dir, legacy_log, days):
             "duration_minutes": 0,
             "status": entry.get("discord_status") or "online",
             "activity": activity,
-            "spotify": sp_str,
+            "spotify": None,
         }
 
     for e in entries:
@@ -205,7 +184,6 @@ def _get_timeline(log_dir, legacy_log, days):
             tuple(sorted(names)),
             has_spotify,
         )
-        status = e.get("discord_status") or "online"
         now = e["_dt"]
 
         if prev_content is None:
@@ -216,17 +194,12 @@ def _get_timeline(log_dir, legacy_log, days):
             continue
 
         if content != prev_content:
-            # Real change — close current period, start new one
             _close_period(now)
             current_period = _make_period(e, now)
 
         # Update Spotify display to latest track in this period
         if has_spotify and current_period:
             current_period["spotify"] = _format_spotify(e)
-
-        # Track dominant status within the period
-        if current_period:
-            _status_counts[status] = _status_counts.get(status, 0) + 1
 
         prev_content = content
 
@@ -242,10 +215,10 @@ def _get_timeline(log_dir, legacy_log, days):
     return json.dumps({"timeline": timeline, "periods": len(timeline)})
 
 
-def _get_stats(log_dir, legacy_log, days):
+def _get_stats(log_dir, days):
     """Get aggregated statistics."""
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
-    entries = _load_entries(log_dir, cutoff, legacy_log)
+    entries = _load_entries(log_dir, cutoff)
 
     if not entries:
         return json.dumps({"error": "No entries found"})
@@ -271,7 +244,6 @@ def _get_stats(log_dir, legacy_log, days):
                     platform_minutes[p] += share
 
     # Spotify stats — each track play has a unique timestamps.start
-    # Count each play once (dedupe by timestamps.start)
     seen_plays = set()
     track_ms = defaultdict(float)
     artist_ms = defaultdict(float)
@@ -285,11 +257,10 @@ def _get_stats(log_dir, legacy_log, days):
             continue
         ts_info = spotify.get("timestamps", {})
         play_start = ts_info.get("start")
-        start_ms = play_start
         end_ms = ts_info.get("end")
-        if start_ms and end_ms and play_start not in seen_plays:
+        if play_start and end_ms and play_start not in seen_plays:
             seen_plays.add(play_start)
-            dur_ms = max(0, end_ms - start_ms)
+            dur_ms = max(0, end_ms - play_start)
             key = f"{song}|{artist}"
             track_ms[key] += dur_ms
             for a in artist.split(";"):
@@ -325,10 +296,10 @@ def _get_stats(log_dir, legacy_log, days):
     })
 
 
-def _get_spotify(log_dir, legacy_log, minutes):
+def _get_spotify(log_dir, minutes):
     """Get recent Spotify listening history."""
     cutoff = datetime.now(timezone.utc) - timedelta(minutes=minutes)
-    entries = _load_entries(log_dir, cutoff, legacy_log)
+    entries = _load_entries(log_dir, cutoff)
 
     songs = []
     for e in entries:
@@ -350,10 +321,10 @@ def _get_spotify(log_dir, legacy_log, minutes):
     return json.dumps({"songs": deduped, "total_entries": len(deduped)})
 
 
-def _get_history(log_dir, legacy_log, minutes):
+def _get_history(log_dir, minutes):
     """Get raw recent entries."""
     cutoff = datetime.now(timezone.utc) - timedelta(minutes=minutes)
-    entries = _load_entries(log_dir, cutoff, legacy_log)
+    entries = _load_entries(log_dir, cutoff)
 
     result = []
     for e in entries[-20:]:  # Last 20 entries max
@@ -377,19 +348,18 @@ def discord_activity(args: dict, **kwargs) -> str:
     days = args.get("days", 1)
 
     log_dir = _get_log_dir()
-    legacy_log = _DEFAULT_LEGACY_LOG if _DEFAULT_LEGACY_LOG.exists() else None
 
     try:
         if query == "status":
-            return _get_current_status(log_dir, legacy_log)
+            return _get_current_status(log_dir)
         elif query == "timeline":
-            return _get_timeline(log_dir, legacy_log, days)
+            return _get_timeline(log_dir, days)
         elif query == "stats":
-            return _get_stats(log_dir, legacy_log, days)
+            return _get_stats(log_dir, days)
         elif query == "spotify":
-            return _get_spotify(log_dir, legacy_log, minutes)
+            return _get_spotify(log_dir, minutes)
         elif query == "history":
-            return _get_history(log_dir, legacy_log, minutes)
+            return _get_history(log_dir, minutes)
         else:
             return json.dumps({"error": f"Unknown query: {query}"})
     except Exception as e:

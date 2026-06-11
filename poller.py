@@ -41,6 +41,24 @@ except ImportError:
 WIB = timezone(timedelta(hours=7))
 
 
+def _is_process_alive(pid):
+    """Check if a process is still running (cross-platform)."""
+    try:
+        if os.name == "nt":
+            import ctypes
+            kernel32 = ctypes.windll.kernel32
+            handle = kernel32.OpenProcess(0x100000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+            if handle:
+                kernel32.CloseHandle(handle)
+                return True
+            return False
+        else:
+            os.kill(pid, 0)
+            return True
+    except (OSError, ProcessLookupError):
+        return False
+
+
 class ActivityPoller:
     """Background thread that polls Lanyard REST and writes daily JSONL."""
 
@@ -56,19 +74,13 @@ class ActivityPoller:
 
     def start(self):
         """Start the polling thread (only if not already running)."""
-        # PID lock to prevent duplicate pollers across gateway instances
         lock_file = self.log_dir / ".poller.lock"
         self.log_dir.mkdir(parents=True, exist_ok=True)
 
         if lock_file.exists():
             try:
                 old_pid = int(lock_file.read_text().strip())
-                # Check if that process is still alive
-                import ctypes
-                kernel32 = ctypes.windll.kernel32
-                handle = kernel32.OpenProcess(0x100000, False, old_pid)  # PROCESS_QUERY_LIMITED_INFORMATION
-                if handle:
-                    kernel32.CloseHandle(handle)
+                if _is_process_alive(old_pid):
                     print("[discord-activity] Poller already running (another instance holds lock)")
                     return
             except (ValueError, OSError):
@@ -86,7 +98,6 @@ class ActivityPoller:
         self._stop.set()
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=5)
-        # Release lock file
         if hasattr(self, "_lock_file") and self._lock_file and self._lock_file.exists():
             try:
                 self._lock_file.unlink()
@@ -97,9 +108,10 @@ class ActivityPoller:
     def _run(self):
         """Main polling loop — runs in a background thread."""
         while not self._stop.is_set():
-            # Sleep until the next minute boundary for aligned ticks
+            # Sleep until the next poll_interval-aligned boundary
             now = datetime.now(WIB)
-            wait = 60 - now.second - now.microsecond / 1_000_000
+            elapsed_in_interval = (now.minute * 60 + now.second) % self.poll_interval
+            wait = self.poll_interval - elapsed_in_interval - now.microsecond / 1_000_000
             if wait > 0:
                 self._stop.wait(wait)
             if self._stop.is_set():
