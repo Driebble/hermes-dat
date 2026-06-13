@@ -106,6 +106,7 @@ def _extract_activities(entry):
     Rich Presence format. Handles any app generically.
     Deduplicates by (name, details, state) — same video from multiple
     sources (PreMiD + native) collapses to one.
+    Only extracts games when they are actively "In Game".
     """
     seen = set()
     result = []
@@ -116,8 +117,14 @@ def _extract_activities(entry):
         if not name or name.lower() == "spotify":
             continue
 
-        details = act.get("details")
+        # Filter out lobby/queue/champion select game states
+        is_game = act.get("type") == 0
         state = act.get("state")
+        has_rich_states = state in ("In Game", "In Lobby", "In Queue", "In Champion Select")
+        if is_game and has_rich_states and state != "In Game":
+            continue
+
+        details = act.get("details")
 
         # Deduplicate by (name, details, state)
         sig = (name, details, state)
@@ -135,12 +142,6 @@ def _extract_activities(entry):
 
         if state:
             activity["state"] = state
-
-        party = act.get("party")
-        if party and party.get("size"):
-            size = party["size"]
-            if isinstance(size, list) and len(size) >= 2:
-                activity["party"] = {"current": size[0], "max": size[1]}
 
         timestamps = act.get("timestamps")
         if timestamps:
@@ -279,8 +280,12 @@ def _get_timeline(log_dir, days):
 
     def _make_period(entry, start_dt):
         names = _activity_names(entry)
-        activity = ", ".join(names) if names else "Online"
-        
+        cleaned_names = []
+        for act in _extract_activities(entry):
+            cleaned_names.append(act["name"])
+
+        activity = ", ".join(cleaned_names) if cleaned_names else "Online"
+
         # Initialize internal accumulator dict for merging activities across this period
         accum = {}
         for act in _extract_activities(entry):
@@ -303,9 +308,19 @@ def _get_timeline(log_dir, days):
     for e in entries:
         names = _activity_names(e)
         has_spotify = bool((e.get("spotify") or {}).get("song"))
+
+        # Build content key
+        active_activities = []
+        for act in _extract_activities(e):
+            # Split games on match start timestamp or champion name
+            start_ts = act.get("timestamps", {}).get("start")
+            champion = act.get("champion")
+            active_activities.append((act["name"], act.get("state"), start_ts or champion, act.get("details")))
+
         content = (
-            tuple(sorted(names)),
+            tuple(sorted([name for name in names if name in [m[0] for m in active_activities]])),
             has_spotify,
+            tuple(sorted(active_activities))
         )
         now = e["_dt"]
 
@@ -329,37 +344,7 @@ def _get_timeline(log_dir, days):
             for act in new_acts:
                 aname = act["name"]
                 if aname in accum:
-                    existing = accum[aname]
-                    # Prioritize richer state (In Game over In Lobby)
-                    is_new_richer = (
-                        ("details" in act and "details" not in existing) or
-                        ("timestamps" in act and "timestamps" not in existing) or
-                        (act.get("state") == "In Game" and existing.get("state") != "In Game") or
-                        (act.get("state") == "In Champion Select" and existing.get("state") == "In Lobby")
-                    )
-
-                    if is_new_richer:
-                        # Retain existing fields if the new richer one doesn't have them
-                        party = act.get("party") or existing.get("party")
-                        champion = act.get("champion") or existing.get("champion")
-                        large_text = act.get("large_text") or existing.get("large_text")
-
-                        existing.update(act)
-                        if party: existing["party"] = party
-                        if champion: existing["champion"] = champion
-                        if large_text: existing["large_text"] = large_text
-                    else:
-                        # Just merge any new fields into the richer existing one
-                        if "party" not in existing and "party" in act:
-                            existing["party"] = act["party"]
-                        if "champion" not in existing and "champion" in act:
-                            existing["champion"] = act["champion"]
-                        if "large_text" not in existing and "large_text" in act:
-                            existing["large_text"] = act["large_text"]
-                        if "timestamps" not in existing and "timestamps" in act:
-                            existing["timestamps"] = act["timestamps"]
-                        if "details" not in existing and "details" in act:
-                            existing["details"] = act["details"]
+                    accum[aname].update(act)
                 else:
                     accum[aname] = act
 
@@ -375,13 +360,17 @@ def _get_timeline(log_dir, days):
     if entries:
         _close_period(entries[-1]["_dt"])
 
-    # Filter out periods shorter than 1 minute
-    timeline = [p for p in timeline if p["duration_minutes"] >= 1.0]
+    # Filter out short periods (<1m) and Online-only periods without Spotify
+    filtered = []
+    for p in timeline:
+        if p["duration_minutes"] >= 1.0:
+            if p["activity"] != "Online" or p.get("spotify"):
+                # Ignore transient playing states with no details
+                if p["activity_details"] and all(act.get("type") == "playing" and not act.get("details") for act in p["activity_details"]):
+                    continue
+                filtered.append(p)
 
-    # Filter out "Online (no activity)" periods — keep only real activity
-    timeline = [p for p in timeline if p["activity"] != "Online" or p.get("spotify")]
-
-    return json.dumps({"timeline": timeline, "periods": len(timeline)})
+    return json.dumps({"timeline": filtered, "periods": len(filtered)})
 
 
 def _get_stats(log_dir, days):
