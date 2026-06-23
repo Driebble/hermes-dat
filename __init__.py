@@ -23,20 +23,6 @@ def _get_log_dir():
     return get_hermes_home() / "logs" / "discord-activity"
 
 
-def _truthy(value):
-    """Parse a string env var as boolean. Defaults to False on empty/invalid."""
-    return (value or "").strip().lower() in ("1", "true", "yes", "on")
-
-
-def _parse_gap(value, default=30):
-    """Parse a session-gap env var as positive int, falling back to default."""
-    try:
-        n = int((value or "").strip())
-        return n if n > 0 else default
-    except (ValueError, AttributeError):
-        return default
-
-
 def register(ctx):
     """Register the discord_activity tool and start the background poller."""
     user_id = os.environ.get("DISCORD_ACTIVITY_USER_ID")
@@ -44,8 +30,13 @@ def register(ctx):
         return
 
     # Read optional env config (with safe defaults)
-    ignore_spotify = _truthy(os.environ.get("DISCORD_ACTIVITY_IGNORE_SPOTIFY"))
-    session_gap_minutes = _parse_gap(os.environ.get("DISCORD_ACTIVITY_SESSION_GAP_MINUTES"))
+    ignore_spotify = (os.environ.get("DISCORD_ACTIVITY_IGNORE_SPOTIFY", "").strip().lower()
+                      in ("1", "true", "yes", "on"))
+    try:
+        gap = int(os.environ.get("DISCORD_ACTIVITY_SESSION_GAP_MINUTES", "30"))
+        session_gap_minutes = gap if gap > 0 else 30
+    except ValueError:
+        session_gap_minutes = 30
 
     # Register tool
     from . import schemas, tools as discord_tools

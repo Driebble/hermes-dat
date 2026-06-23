@@ -126,13 +126,16 @@ def _extract_activities(entry):
         if not name or name.lower() == "spotify":
             continue
 
-        # League of Legends special-case: filter menu/lobby/queue time.
-        # The LoL client doesn't always populate the `state` field, so we
-        # use `details` (e.g. "ARAM: Mayhem") as the "in a match" signal.
-        # Other games are not affected — they typically only emit rich
-        # presence while actively playing, so menu filtering isn't needed.
-        if act.get("name") == "League of Legends" and not act.get("details"):
-            continue
+        # League of Legends special-case: use `timestamps.start` as the
+        # in-match signal. The LoL client emits a unique start-ms for each
+        # active match (post-game lobby / queue / menu have no timestamps).
+        # This is more reliable than `state` (not always populated) or
+        # `details` (varies by game mode, can be empty for the first polls
+        # of a match). Other games are unaffected.
+        if act.get("name") == "League of Legends":
+            ts_info = act.get("timestamps") or {}
+            if not ts_info.get("start"):
+                continue
 
         details = act.get("details")
         state = act.get("state")
@@ -164,13 +167,13 @@ def _extract_activities(entry):
             if ts_data:
                 activity["timestamps"] = ts_data
 
-        # Generic assets helper (large_text / small_text / champion name)
+        # Generic assets helper (large_text / small_text)
         assets = act.get("assets")
         if assets:
             if assets.get("large_text"):
                 activity["large_text"] = assets["large_text"]
-                if name == "League of Legends":
-                    activity["champion"] = assets["large_text"]
+            if assets.get("small_text"):
+                activity["small_text"] = assets["small_text"]
 
         result.append(activity)
 
@@ -281,8 +284,8 @@ def _get_sessions(log_dir, days):
             sess["end"] = now.strftime("%H:%M")
             sess["duration_minutes"] = round((now - sess["_start_dt"]).total_seconds() / 60.0)
             
-            # Extract detail strings (e.g. video titles, champions, file names)
-            detail_str = act.get("champion") or act.get("details")
+            # Extract detail strings (e.g. video titles, file names)
+            detail_str = act.get("details")
             if detail_str and detail_str not in ("Idling", "Searching for", "Viewing Homepage", "Browsing repository"):
                 # Clean up known prefixes for brevity
                 if detail_str.startswith("Working on "):
