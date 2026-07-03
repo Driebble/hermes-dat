@@ -228,6 +228,8 @@ def _get_current_status(log_dir):
                         entry = json.loads(line)
                         activities = _extract_activities(entry)
                         spotify = _extract_spotify(entry)
+                        if spotify is None and IGNORE_SPOTIFY:
+                            spotify = {"ignored": True, "reason": "Spotify data disabled in config"}
                         return json.dumps({
                             "status": entry.get("discord_status"),
                             "activities": activities,
@@ -436,6 +438,9 @@ def _get_stats(log_dir, days):
             "top_content": top_content,
         },
         "spotify": {
+            "ignored": True,
+            "reason": "Spotify stats disabled in config",
+        } if IGNORE_SPOTIFY else {
             "listening_minutes": round(sum(track_ms.values()) / 60000, 1),
             "unique_tracks": len(track_ms),
             "unique_artists": len(artist_ms),
@@ -483,11 +488,14 @@ def _get_history(log_dir, minutes):
 
     result = []
     for e in entries[-20:]:  # Last 20 entries max
+        spotify = _extract_spotify(e)
+        if spotify is None and IGNORE_SPOTIFY:
+            spotify = {"ignored": True}
         result.append({
             "time": e.get("timestamp", "")[:19],
             "status": e.get("discord_status"),
             "activities": _extract_activities(e),
-            "spotify": _extract_spotify(e),
+            "spotify": spotify,
         })
 
     return json.dumps({"entries": result, "total": len(entries)})

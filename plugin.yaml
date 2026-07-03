@@ -1,4 +1,4 @@
-name: hermes-discord-activity-tracker
+name: hermes-dat
 version: 1.0.0
 description: Discord presence tracking — REST polling via Lanyard, daily JSONL logs, activity queries
 author: Aura
