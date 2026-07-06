@@ -43,7 +43,7 @@ def register(ctx):
 
     ctx.register_tool(
         name="discord_activity",
-        toolset="hermes-dat",
+        toolset="web",
         schema=schemas.DISCORD_ACTIVITY,
         handler=discord_tools.discord_activity,
     )
