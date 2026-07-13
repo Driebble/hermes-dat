@@ -487,7 +487,7 @@ def _get_history(log_dir, minutes):
     entries = _load_entries(log_dir, cutoff)
 
     result = []
-    for e in entries[-20:]:  # Last 20 entries max
+    for e in entries:
         spotify = _extract_spotify(e)
         if spotify is None and IGNORE_SPOTIFY:
             spotify = {"ignored": True}
